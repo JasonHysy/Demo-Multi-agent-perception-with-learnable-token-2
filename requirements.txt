@@ -1,0 +1,12 @@
+matplotlib
+numpy
+scipy
+torch
+torchvision
+tqdm
+pydensecrf
+protobuf
+tensorboardX
+pyyaml
+pretrainedmodels
+opencv-python
