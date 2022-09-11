@@ -60,8 +60,6 @@ python train.py --config configs/mrms_when2com.yml --gpu=0
 # [Multi-request multi-support] Modified when2com model with learnable token
 python train.py --config configs/mrms_MIMO2.yml --gpu=0
 
-# [single-request multi-support] Modified when2com model with learnable token
-python train.py --config configs/srms_when2com2.yml --gpu=0
 ```
 
 ### Testing 
