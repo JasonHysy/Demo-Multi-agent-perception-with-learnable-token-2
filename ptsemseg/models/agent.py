@@ -132,15 +132,35 @@ class policy_net4(nn.Module):
         self.conv5 = conv2DBatchNormRelu(256, 256, k_size=3, stride=2, padding=1)
 
     def forward(self, features_map):
-        outputs1 = self.img_encoder(features_map)
-
+        outputs1 = self.img_encoder(features_map) #[14, 512, 16, 16]
         outputs = self.conv1(outputs1)
+        outputs = self.conv2(outputs)
+        outputs = self.conv3(outputs)
+        outputs = self.conv4(outputs)
+        outputs = self.conv5(outputs) #[14, 256, 4, 4]
+        return outputs
+
+class policy_net5(nn.Module):
+    def __init__(self):
+        super(policy_net5, self).__init__()
+
+        # Encoder
+        # down 1
+        self.conv1 = conv2DBatchNormRelu(512, 512, k_size=3, stride=1, padding=1)
+        self.conv2 = conv2DBatchNormRelu(512, 256, k_size=3, stride=1, padding=1)
+        self.conv3 = conv2DBatchNormRelu(256, 256, k_size=3, stride=2, padding=1)
+
+        # down 2
+        self.conv4 = conv2DBatchNormRelu(256, 256, k_size=3, stride=1, padding=1)
+        self.conv5 = conv2DBatchNormRelu(256, 256, k_size=3, stride=2, padding=1)
+
+    def forward(self, features_map):
+        outputs = self.conv1(features_map) #[14, 512, 16, 16]
         outputs = self.conv2(outputs)
         outputs = self.conv3(outputs)
         outputs = self.conv4(outputs)
         outputs = self.conv5(outputs)
         return outputs
-
 
 class km_generator(nn.Module):
     def __init__(self, out_size=128, input_feat_sz=32):
@@ -568,6 +588,7 @@ class MIMOcom(nn.Module):
             input_list.append(inputs[:, 3 * i:3 * i + 3, :, :])
         return input_list
 
+
     def forward(self, inputs, training=True, MO_flag=False , inference='argmax'):
         batch_size, _, _, _ = inputs.size() #[2, 18, 512, 512]
         input_list = self.divide_inputs(inputs)
@@ -693,12 +714,19 @@ class MIMO2(nn.Module):
 
         print('Modified: MIMOcom with learnable token')  # our model: detach the learning of values and keys
 
-        self.token = nn.Parameter(torch.randn(2, in_channels, feat_channel, feat_channel))  # define the learnable token [2, 3, 512, 512]
+        self.token = nn.Parameter(torch.randn(2, self.feature_map_channel, 16, 16))  #define the learnable token [2, 3, 512, 512]
         print('Token initialized -', self.token.shape)
 
+        self.feature_kq_net = policy_net5()
+
+        '''
+        self.token_decoder = img_decoder(n_classes=in_channels, in_channels=feat_channel,
+                                   feat_squeezer=feat_squeezer, dec_backbone=dec_backbone)
+        '''
 
         self.u_encoder = img_encoder(n_classes=n_classes, in_channels=in_channels, feat_channel=feat_channel,
                                      feat_squeezer=feat_squeezer, enc_backbone=enc_backbone)
+
 
         self.key_net = km_generator(out_size=self.key_size, input_feat_sz=image_size / 32)
         self.attention_net = GeneralDotProductAttention(self.query_size, self.key_size)
@@ -712,8 +740,10 @@ class MIMO2(nn.Module):
         # Segmentation decoder
         self.decoder = img_decoder(n_classes=n_classes, in_channels=self.feature_map_channel,
                                    feat_squeezer=feat_squeezer, dec_backbone=dec_backbone)
-        self.token_decoder = img_decoder(n_classes=in_channels, in_channels=feat_channel,
-                                   feat_squeezer=feat_squeezer, dec_backbone=dec_backbone)
+
+
+
+
         # List the parameters of each modules
         self.attention_paras = list(self.attention_net.parameters())
         if self.shared_img_encoder == 'unified':
@@ -725,39 +755,6 @@ class MIMO2(nn.Module):
             self.policy_net_paras = self.policy_net_paras + list(self.query_net.parameters())
 
         self.all_paras = self.img_net_paras + self.policy_net_paras
-
-
-    def activated_select(self, vals, W_mat, thres=0.155):
-        action = torch.mul(W_mat, (W_mat > thres).float())
-        attn = action.view(action.shape[0], action.shape[2], 1, 1, 1)  # (batch,5,1,1,1)
-        output = attn * vals
-        feat_fuse = output.sum(1)  # (batch,1,channel,size,size)
-
-        batch_size = action.shape[0]
-        num_connect = torch.nonzero(action[:, :, 1:]).shape[0] / batch_size
-
-        return feat_fuse, action, num_connect
-
-    #modified from srms-Learnwhen2com activated select, aims to eliminate the effect of one noise camera
-    def argmin_deselect(self, vals, W_mat): #W_mat: # (batch, 1, size)
-        attn_shape = W_mat.shape
-        temp = torch.ones(attn_shape).to('cuda')
-
-        min_val, min_ind = torch.min(W_mat, 2)
-        for i in range(attn_shape[0]):
-            ind = min_ind[i][0].item()
-            temp[i][0][ind] = 0
-
-        action = torch.mul(W_mat, (temp > 0).float())
-
-        attn = action.view(action.shape[0], action.shape[2], 1, 1, 1)  # (batch,5,1,1,1)
-        output = attn * vals
-        feat_fuse = output.sum(1)  # (batch,1,channel,size,size)
-
-        batch_size = action.shape[0]
-        num_connect = torch.nonzero(action[:, :, 1:]).shape[0] / batch_size
-
-        return feat_fuse, action, num_connect
 
     def agents2batch(self, feats):
         agent_num = feats.shape[1]
@@ -776,7 +773,26 @@ class MIMO2(nn.Module):
             input_list.append(inputs[:, 3 * i:3 * i + 3, :, :])
         return input_list
 
+    def activated_select(self, vals, W_mat, thres=0.2):
+        action = torch.mul(W_mat, (W_mat > thres).float())
+        attn = action.view(action.shape[0], action.shape[2], 1, 1, 1)  # (batch,5,1,1,1)
+        output = attn * vals
+        feat_fuse = output.sum(1)  # (batch,1,channel,size,size)
+
+        batch_size = action.shape[0]
+        num_connect = torch.nonzero(action[:, :, 1:]).shape[0] / batch_size
+
+        return feat_fuse, action, num_connect
+
+
     def forward(self, inputs, training=True, MO_flag = False, inference='argmax'):
+        if training:
+            return self.forward_train(inputs, training, MO_flag, inference)
+        else:
+            return self.forward_eval(inputs, training, MO_flag, inference)
+
+    #communication through limited bandwidth
+    def forward_eval(self, inputs, training=True, MO_flag=False, inference='argmax'):
         batch_size, _, _, _ = inputs.size()  # [2, 18, 512, 512]
         input_list = self.divide_inputs(inputs)
         num_connect = 0
@@ -784,7 +800,7 @@ class MIMO2(nn.Module):
         if self.shared_img_encoder == 'unified':
 
             unified_feat_map = torch.cat(
-                (input_list[0], input_list[1], input_list[2], input_list[3], input_list[4], input_list[5], self.token),
+                (input_list[0], input_list[1], input_list[2], input_list[3], input_list[4], input_list[5]),
                 0)
 
             feat_map = self.u_encoder(unified_feat_map)
@@ -795,21 +811,23 @@ class MIMO2(nn.Module):
             feat_map4 = torch.unsqueeze(feat_map[batch_size * 3:batch_size * 4], 1)
             feat_map5 = torch.unsqueeze(feat_map[batch_size * 4:batch_size * 5], 1)
             feat_map6 = torch.unsqueeze(feat_map[batch_size * 5:batch_size * 6], 1)
-            token_feat_map = torch.unsqueeze(feat_map[batch_size * 6:batch_size * 7], 1)
 
 
         else:
             raise ValueError('Incorrect encoder')
 
         unified_feat_map = torch.cat(
-            (input_list[0], input_list[1], input_list[2], input_list[3], input_list[4], input_list[5], self.token),
+            (input_list[0], input_list[1], input_list[2], input_list[3], input_list[4], input_list[5]),
             0)
-        #[14, 3, 512, 512]
-        query_key_map = self.query_key_net(unified_feat_map)
+        # [12, 3, 512, 512]
 
+        query_key_map = self.query_key_net(unified_feat_map)
+        # [12, 256, 4, 4]
+
+        token_query_key_map = self.feature_kq_net(self.token)
 
         keys = self.key_net(query_key_map)
-
+        # [12, 1024]
 
         key1 = torch.unsqueeze(keys[0:batch_size * 1], 1)
         key2 = torch.unsqueeze(keys[batch_size * 1:batch_size * 2], 1)
@@ -817,7 +835,6 @@ class MIMO2(nn.Module):
         key4 = torch.unsqueeze(keys[batch_size * 3:batch_size * 4], 1)
         key5 = torch.unsqueeze(keys[batch_size * 4:batch_size * 5], 1)
         key6 = torch.unsqueeze(keys[batch_size * 5:batch_size * 6], 1)
-        token_key = torch.unsqueeze(keys[batch_size * 6:batch_size * 7], 1)
 
         if self.has_query:
             querys = self.query_net(query_key_map)
@@ -828,13 +845,257 @@ class MIMO2(nn.Module):
             query4 = torch.unsqueeze(querys[batch_size * 3:batch_size * 4], 1)
             query5 = torch.unsqueeze(querys[batch_size * 4:batch_size * 5], 1)
             query6 = torch.unsqueeze(querys[batch_size * 5:batch_size * 6], 1)
-            token_query = torch.unsqueeze(querys[batch_size * 6:batch_size * 7], 1)
 
-            querys = torch.cat((query1, query2, query3, query4, query5, query6, token_query), 1)
+
         else:
             querys = torch.ones(batch_size, 7, self.query_size).to('cuda')
-            token_query = querys[batch_size * 6:batch_size * 7]
 
+        token_query = self.query_net(token_query_key_map)  # [2, 32]
+        token_query = torch.unsqueeze(token_query, 1)  # [2, 1, 32]
+        token_key = self.key_net(token_query_key_map)  # [2, 32]
+        token_key = torch.unsqueeze(token_key, 1)  # [2, 1, 32]
+        '''
+        first self-attention <--- token, agent 1, agent 2, agent 3, agent 4, agent 5, agent 6
+        '''
+        keys = torch.cat((token_key,
+                          key1, key2, key3, key4, key5, key6), 1)
+        vals = torch.cat((torch.unsqueeze(self.token, 1),
+                          feat_map1, feat_map2, feat_map3, feat_map4, feat_map5, feat_map6), 1)
+        # querys = torch.cat((query1, query2, query3, query4, query5, query6), 1)
+
+        '''aggregate feature to token# '''
+        _, prob_action = self.attention_net(token_query, keys, vals,
+                                            sparse=self.sparse)  # [2, 512, 16, 16], [2, 1, 5]
+        feat_act, _, num_connect0 = self.activated_select(vals, prob_action, 0.15)
+        # print(prob_action, num_connect0)
+
+        # update the token and its key
+        updated_token = feat_act  # [2, 512, 16, 16]
+        # [512, 16, 16] --> [256, 4, 4]
+        token_query_key_map = self.feature_kq_net(updated_token)
+        token_key = self.key_net(token_query_key_map)  # [2, 1024]
+        token_key = torch.unsqueeze(token_key, 1)
+
+        featmaps_act = torch.unsqueeze(feat_act, 1)
+        # [2, 1, 512, 16, 16]
+
+        # aggregate feature from the learnable token
+        _, prob_action1 = self.attention_net(query1, torch.cat((key1, token_key), 1),
+                                             torch.cat((feat_map1, featmaps_act), 1), sparse=self.sparse)
+        aux_feat1, _, num_connect1 = self.activated_select(torch.cat((feat_map1, featmaps_act), 1),
+                                                           prob_action1)
+        aux_feat1 = torch.unsqueeze(aux_feat1, 1)
+        aux_feat1 = torch.add(aux_feat1, feat_map1)
+
+        _, prob_action2 = self.attention_net(query2, torch.cat((key2, token_key), 1),
+                                             torch.cat((feat_map2, featmaps_act), 1), sparse=self.sparse)
+        aux_feat2, _, num_connect2 = self.activated_select(torch.cat((feat_map2, featmaps_act), 1),
+                                                           prob_action2)
+        aux_feat2 = torch.unsqueeze(aux_feat2, 1)
+        aux_feat2 = torch.add(aux_feat2, feat_map2)
+
+        _, prob_action3 = self.attention_net(query3, torch.cat((key3, token_key), 1),
+                                             torch.cat((feat_map3, featmaps_act), 1), sparse=self.sparse)
+        aux_feat3, _, num_connect3 = self.activated_select(torch.cat((feat_map3, featmaps_act), 1),
+                                                           prob_action3)
+        aux_feat3 = torch.unsqueeze(aux_feat3, 1)
+        aux_feat3 = torch.add(aux_feat3, feat_map3)
+
+        _, prob_action4 = self.attention_net(query4, torch.cat((key4, token_key), 1),
+                                             torch.cat((feat_map4, featmaps_act), 1), sparse=self.sparse)
+        aux_feat4, _, num_connect4 = self.activated_select(torch.cat((feat_map4, featmaps_act), 1),
+                                                           prob_action4)
+        aux_feat4 = torch.unsqueeze(aux_feat4, 1)
+        aux_feat4 = torch.add(aux_feat4, feat_map4)
+
+        _, prob_action5 = self.attention_net(query5, torch.cat((key5, token_key), 1),
+                                             torch.cat((feat_map5, featmaps_act), 1), sparse=self.sparse)
+        aux_feat5, _, num_connect5 = self.activated_select(torch.cat((feat_map5, featmaps_act), 1),
+                                                           prob_action5)
+        aux_feat5 = torch.unsqueeze(aux_feat5, 1)
+        aux_feat5 = torch.add(aux_feat5, feat_map5)
+
+        _, prob_action6 = self.attention_net(query6, torch.cat((key6, token_key), 1),
+                                             torch.cat((feat_map6, featmaps_act), 1), sparse=self.sparse)
+        aux_feat6, _, num_connect6 = self.activated_select(torch.cat((feat_map6, featmaps_act), 1),
+                                                           prob_action6)
+        aux_feat6 = torch.unsqueeze(aux_feat6, 1)
+        aux_feat6 = torch.add(aux_feat6, feat_map6)
+
+        num_connect += (num_connect0 +
+                        num_connect1 + num_connect2 + num_connect3 + num_connect4 + num_connect5 + num_connect6)
+
+        '''second step'''
+        feat_fuse = torch.cat((aux_feat1, aux_feat2, aux_feat3, aux_feat4, aux_feat5, aux_feat6), 1)
+        feat_fuse = torch.squeeze(feat_fuse)
+        feat_fuse = self.agents2batch(feat_fuse)
+
+        token_query = self.query_net(token_query_key_map)  # [2, 32]
+        token_query = torch.unsqueeze(token_query, 1)  # [2, 1, 32]
+
+        query_key_map = self.feature_kq_net(feat_fuse)
+        # [12, 256, 4, 4]
+        keys = self.key_net(query_key_map)
+        # [12, 1024]
+
+        key1 = torch.unsqueeze(keys[0:batch_size * 1], 1)
+        key2 = torch.unsqueeze(keys[batch_size * 1:batch_size * 2], 1)
+        key3 = torch.unsqueeze(keys[batch_size * 2:batch_size * 3], 1)
+        key4 = torch.unsqueeze(keys[batch_size * 3:batch_size * 4], 1)
+        key5 = torch.unsqueeze(keys[batch_size * 4:batch_size * 5], 1)
+        key6 = torch.unsqueeze(keys[batch_size * 5:batch_size * 6], 1)
+
+        if self.has_query:
+            querys = self.query_net(query_key_map)
+
+            query1 = torch.unsqueeze(querys[0:batch_size * 1], 1)
+            query2 = torch.unsqueeze(querys[batch_size * 1:batch_size * 2], 1)
+            query3 = torch.unsqueeze(querys[batch_size * 2:batch_size * 3], 1)
+            query4 = torch.unsqueeze(querys[batch_size * 3:batch_size * 4], 1)
+            query5 = torch.unsqueeze(querys[batch_size * 4:batch_size * 5], 1)
+            query6 = torch.unsqueeze(querys[batch_size * 5:batch_size * 6], 1)
+
+
+        else:
+            querys = torch.ones(batch_size, 7, self.query_size).to('cuda')
+
+        keys = torch.cat((token_key,
+                          key1, key2, key3, key4, key5, key6), 1)
+        vals = torch.cat((torch.unsqueeze(updated_token, 1)
+                          , feat_map1, feat_map2, feat_map3, feat_map4, feat_map5, feat_map6), 1)
+        # querys = torch.cat((query1, query2, query3, query4, query5, query6), 1)
+
+        # aggregate feature to token
+        _, prob_action = self.attention_net(token_query, keys, vals,
+                                            sparse=self.sparse)  # [2, 512, 16, 16], [2, 1, 5]
+        feat_act, _, num_connect0 = self.activated_select(vals, prob_action, 0.15)
+        # print(prob_action, num_connect0)
+        # exit()
+        updated_token = feat_act  # [2, 512, 16, 16]
+        # [512, 16, 16] --> [256, 4, 4]
+        token_query_key_map = self.feature_kq_net(updated_token)
+        token_key = self.key_net(token_query_key_map)  # [2, 1024]
+        token_key = torch.unsqueeze(token_key, 1)
+
+        featmaps_act = torch.unsqueeze(feat_act, 1)
+        # [2, 1, 512, 16, 16]
+
+        # aggregate feature from the learnable token
+        # aggregate feature from the learnable token
+        _, prob_action1 = self.attention_net(query1, torch.cat((key1, token_key), 1),
+                                             torch.cat((feat_map1, featmaps_act), 1), sparse=self.sparse)
+        aux_feat1, _, num_connect1 = self.activated_select(torch.cat((feat_map1, featmaps_act), 1),
+                                                           prob_action1)
+        aux_feat1 = torch.unsqueeze(aux_feat1, 1)
+        aux_feat1 = torch.add(aux_feat1, feat_map1)
+
+        _, prob_action2 = self.attention_net(query2, torch.cat((key2, token_key), 1),
+                                             torch.cat((feat_map2, featmaps_act), 1), sparse=self.sparse)
+        aux_feat2, _, num_connect2 = self.activated_select(torch.cat((feat_map2, featmaps_act), 1),
+                                                           prob_action2)
+        aux_feat2 = torch.unsqueeze(aux_feat2, 1)
+        aux_feat2 = torch.add(aux_feat2, feat_map2)
+
+        _, prob_action3 = self.attention_net(query3, torch.cat((key3, token_key), 1),
+                                             torch.cat((feat_map3, featmaps_act), 1), sparse=self.sparse)
+        aux_feat3, _, num_connect3 = self.activated_select(torch.cat((feat_map3, featmaps_act), 1),
+                                                           prob_action3)
+        aux_feat3 = torch.unsqueeze(aux_feat3, 1)
+        aux_feat3 = torch.add(aux_feat3, feat_map3)
+
+        _, prob_action4 = self.attention_net(query4, torch.cat((key4, token_key), 1),
+                                             torch.cat((feat_map4, featmaps_act), 1), sparse=self.sparse)
+        aux_feat4, _, num_connect4 = self.activated_select(torch.cat((feat_map4, featmaps_act), 1),
+                                                           prob_action4)
+        aux_feat4 = torch.unsqueeze(aux_feat4, 1)
+        aux_feat4 = torch.add(aux_feat4, feat_map4)
+
+        _, prob_action5 = self.attention_net(query5, torch.cat((key5, token_key), 1),
+                                             torch.cat((feat_map5, featmaps_act), 1), sparse=self.sparse)
+        aux_feat5, _, num_connect5 = self.activated_select(torch.cat((feat_map5, featmaps_act), 1),
+                                                           prob_action5)
+        aux_feat5 = torch.unsqueeze(aux_feat5, 1)
+        aux_feat5 = torch.add(aux_feat5, feat_map5)
+
+        _, prob_action6 = self.attention_net(query6, torch.cat((key6, token_key), 1),
+                                             torch.cat((feat_map6, featmaps_act), 1), sparse=self.sparse)
+        aux_feat6, _, num_connect6 = self.activated_select(torch.cat((feat_map6, featmaps_act), 1),
+                                                           prob_action6)
+        aux_feat6 = torch.unsqueeze(aux_feat6, 1)
+        aux_feat6 = torch.add(aux_feat6, feat_map6)
+
+        num_connect += (num_connect0 +
+                        num_connect1 + num_connect2 + num_connect3 + num_connect4 + num_connect5 + num_connect6)
+
+        feat_fuse = torch.cat((aux_feat1, aux_feat2, aux_feat3, aux_feat4, aux_feat5, aux_feat6), 1)
+        feat_fuse_mat = self.agents2batch(feat_fuse)
+        # weighted feature maps is passed to decoder
+        pred = self.decoder(feat_fuse_mat)  # [12, 11, 512, 512]
+        num_connect /= self.agent_num
+
+        return pred, num_connect
+
+    #all info being available
+    def forward_train(self, inputs, training=True, MO_flag = False, inference='argmax'):
+        batch_size, _, _, _ = inputs.size()  # [2, 18, 512, 512]
+        input_list = self.divide_inputs(inputs)
+        num_connect = 0
+
+        if self.shared_img_encoder == 'unified':
+
+            unified_feat_map = torch.cat(
+                (input_list[0], input_list[1], input_list[2], input_list[3], input_list[4], input_list[5]),
+                0)
+
+            feat_map = self.u_encoder(unified_feat_map)
+
+            feat_map1 = torch.unsqueeze(feat_map[0:batch_size * 1], 1)
+            feat_map2 = torch.unsqueeze(feat_map[batch_size * 1:batch_size * 2], 1)
+            feat_map3 = torch.unsqueeze(feat_map[batch_size * 2:batch_size * 3], 1)
+            feat_map4 = torch.unsqueeze(feat_map[batch_size * 3:batch_size * 4], 1)
+            feat_map5 = torch.unsqueeze(feat_map[batch_size * 4:batch_size * 5], 1)
+            feat_map6 = torch.unsqueeze(feat_map[batch_size * 5:batch_size * 6], 1)
+
+
+        else:
+            raise ValueError('Incorrect encoder')
+
+        unified_feat_map = torch.cat(
+            (input_list[0], input_list[1], input_list[2], input_list[3], input_list[4], input_list[5]),
+            0)
+        # [12, 3, 512, 512]
+
+        query_key_map = self.query_key_net(unified_feat_map)
+        # [12, 256, 4, 4]
+
+        token_query_key_map = self.feature_kq_net(self.token)
+
+        keys = self.key_net(query_key_map)
+        # [12, 1024]
+
+        key1 = torch.unsqueeze(keys[0:batch_size * 1], 1)
+        key2 = torch.unsqueeze(keys[batch_size * 1:batch_size * 2], 1)
+        key3 = torch.unsqueeze(keys[batch_size * 2:batch_size * 3], 1)
+        key4 = torch.unsqueeze(keys[batch_size * 3:batch_size * 4], 1)
+        key5 = torch.unsqueeze(keys[batch_size * 4:batch_size * 5], 1)
+        key6 = torch.unsqueeze(keys[batch_size * 5:batch_size * 6], 1)
+
+        if self.has_query:
+            querys = self.query_net(query_key_map)
+
+            query1 = torch.unsqueeze(querys[0:batch_size * 1], 1)
+            query2 = torch.unsqueeze(querys[batch_size * 1:batch_size * 2], 1)
+            query3 = torch.unsqueeze(querys[batch_size * 2:batch_size * 3], 1)
+            query4 = torch.unsqueeze(querys[batch_size * 3:batch_size * 4], 1)
+            query5 = torch.unsqueeze(querys[batch_size * 4:batch_size * 5], 1)
+            query6 = torch.unsqueeze(querys[batch_size * 5:batch_size * 6], 1)
+
+
+        else:
+            querys = torch.ones(batch_size, 7, self.query_size).to('cuda')
+
+        token_query = self.query_net(token_query_key_map)  # [2, 32]
+        token_query = torch.unsqueeze(token_query, 1)  # [2, 1, 32]
         '''
         first self-attention <--- token, agent 1, agent 2, agent 3, agent 4, agent 5, agent 6
         '''
@@ -843,56 +1104,129 @@ class MIMO2(nn.Module):
         querys = torch.cat((query1, query2, query3, query4, query5, query6), 1)
 
         # aggregate feature to token
-        aux_feat, prob_action = self.attention_net(token_query, keys, vals,
+        feat_act, prob_action = self.attention_net(token_query, keys, vals,
                                                    sparse=self.sparse)  # [2, 512, 16, 16], [2, 1, 5]
-        #disregard the agent with least action values
-        feat_act, _, num_connect = self.argmin_deselect(vals, prob_action)
 
-        #update the token and its key
-        updated_token = self.token_decoder(feat_act) #[2, 3, 512, 512]
-        token_query_key_map = self.query_key_net(updated_token)
-        token_key = self.key_net(token_query_key_map)  #[2, 1024]
+        # update the token and its key
+        updated_token = feat_act  # [2, 512, 16, 16]
+        # [512, 16, 16] --> [256, 4, 4]
+        token_query_key_map = self.feature_kq_net(updated_token)
+        token_key = self.key_net(token_query_key_map)  # [2, 1024]
         token_key = torch.unsqueeze(token_key, 1)
 
         featmaps_act = torch.unsqueeze(feat_act, 1)
-        #[2, 1, 512, 16, 16]
+        # [2, 1, 512, 16, 16]
 
-        #aggregate feature from the learnable token
+        # aggregate feature from the learnable token
+        aux_feat1, prob_action1 = self.attention_net(query1, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat1 = torch.unsqueeze(aux_feat1, 1)
+        aux_feat1 = torch.add(aux_feat1, feat_map1)
 
-        aux_feat1, prob_action1 = self.attention_net(query1, torch.cat((key1, token_key), 1),
-                                                     torch.cat((feat_map1, featmaps_act), 1),
-                                                     sparse=self.sparse)
+        aux_feat2, prob_action2 = self.attention_net(query2, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat2 = torch.unsqueeze(aux_feat2, 1)
+        aux_feat2 = torch.add(aux_feat2, feat_map2)
 
-        aux_feat2, prob_action2 = self.attention_net(query2, torch.cat((key2, token_key), 1),
-                                                     torch.cat((feat_map2, featmaps_act), 1),
-                                                     sparse=self.sparse)
-        aux_feat3, prob_action3 = self.attention_net(query3, torch.cat((key3, token_key), 1),
-                                                     torch.cat((feat_map3, featmaps_act), 1),
-                                                     sparse=self.sparse)
-        aux_feat4, prob_action4 = self.attention_net(query4, torch.cat((key4, token_key), 1),
-                                                     torch.cat((feat_map4, featmaps_act), 1),
-                                                     sparse=self.sparse)
-        aux_feat5, prob_action5 = self.attention_net(query5, torch.cat((key5, token_key), 1),
-                                                     torch.cat((feat_map5, featmaps_act), 1),
-                                                     sparse=self.sparse)
-        aux_feat6, prob_action6 = self.attention_net(query6, torch.cat((key6, token_key), 1),
-                                                     torch.cat((feat_map6, featmaps_act), 1),
-                                                     sparse=self.sparse)
+        aux_feat3, prob_action3 = self.attention_net(query3, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat3 = torch.unsqueeze(aux_feat3, 1)
+        aux_feat3 = torch.add(aux_feat3, feat_map3)
+
+        aux_feat4, prob_action4 = self.attention_net(query4, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat4 = torch.unsqueeze(aux_feat4, 1)
+        aux_feat4 = torch.add(aux_feat4, feat_map4)
+
+        aux_feat5, prob_action5 = self.attention_net(query5, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat5 = torch.unsqueeze(aux_feat5, 1)
+        aux_feat5 = torch.add(aux_feat5, feat_map5)
+
+        aux_feat6, prob_action6 = self.attention_net(query6, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat6 = torch.unsqueeze(aux_feat6, 1)
+        aux_feat6 = torch.add(aux_feat6, feat_map6)
+
         num_connect += batch_size * self.agent_num
 
+        '''second step'''
+        # feat_fuse = torch.cat((aux_feat1, aux_feat2, aux_feat3, aux_feat4, aux_feat5, aux_feat6), 1)
+        feat_fuse = torch.cat((aux_feat1, aux_feat2, aux_feat3, aux_feat4, aux_feat5, aux_feat6), 0)
+        feat_fuse = torch.squeeze(feat_fuse)
 
-        feat_fuse = torch.cat((torch.unsqueeze(aux_feat1, 1),
-                              torch.unsqueeze(aux_feat2, 1),
-                              torch.unsqueeze(aux_feat3, 1),
-                              torch.unsqueeze(aux_feat4, 1),
-                              torch.unsqueeze(aux_feat5, 1),
-                              torch.unsqueeze(aux_feat6, 1)),
-                              1)    #[2, 6, 512, 16, 16]
+        token_query = self.query_net(token_query_key_map)  # [2, 32]
+        token_query = torch.unsqueeze(token_query, 1)  # [2, 1, 32]
 
+        query_key_map = self.feature_kq_net(feat_fuse)
+        # [12, 256, 4, 4]
+        keys = self.key_net(query_key_map)
+        # [12, 1024]
+
+        key1 = torch.unsqueeze(keys[0:batch_size * 1], 1)
+        key2 = torch.unsqueeze(keys[batch_size * 1:batch_size * 2], 1)
+        key3 = torch.unsqueeze(keys[batch_size * 2:batch_size * 3], 1)
+        key4 = torch.unsqueeze(keys[batch_size * 3:batch_size * 4], 1)
+        key5 = torch.unsqueeze(keys[batch_size * 4:batch_size * 5], 1)
+        key6 = torch.unsqueeze(keys[batch_size * 5:batch_size * 6], 1)
+
+        if self.has_query:
+            querys = self.query_net(query_key_map)
+
+            query1 = torch.unsqueeze(querys[0:batch_size * 1], 1)
+            query2 = torch.unsqueeze(querys[batch_size * 1:batch_size * 2], 1)
+            query3 = torch.unsqueeze(querys[batch_size * 2:batch_size * 3], 1)
+            query4 = torch.unsqueeze(querys[batch_size * 3:batch_size * 4], 1)
+            query5 = torch.unsqueeze(querys[batch_size * 4:batch_size * 5], 1)
+            query6 = torch.unsqueeze(querys[batch_size * 5:batch_size * 6], 1)
+
+
+        else:
+            querys = torch.ones(batch_size, 7, self.query_size).to('cuda')
+
+        keys = torch.cat((key1, key2, key3, key4, key5, key6), 1)
+        vals = torch.cat((feat_map1, feat_map2, feat_map3, feat_map4, feat_map5, feat_map6), 1)
+        querys = torch.cat((query1, query2, query3, query4, query5, query6), 1)
+
+        # aggregate feature to token
+        feat_act, prob_action = self.attention_net(token_query, keys, vals,
+                                                   sparse=self.sparse)  # [2, 512, 16, 16], [2, 1, 5]
+
+        updated_token = feat_act  # [2, 512, 16, 16]
+        # [512, 16, 16] --> [256, 4, 4]
+        token_query_key_map = self.feature_kq_net(updated_token)
+        token_key = self.key_net(token_query_key_map)  # [2, 1024]
+        token_key = torch.unsqueeze(token_key, 1)
+
+        featmaps_act = torch.unsqueeze(feat_act, 1)
+        # [2, 1, 512, 16, 16]
+
+        # aggregate feature from the learnable token
+        aux_feat1, prob_action1 = self.attention_net(query1, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat1 = torch.unsqueeze(aux_feat1, 1)
+        aux_feat1 = torch.add(aux_feat1, feat_map1)
+
+        aux_feat2, prob_action2 = self.attention_net(query2, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat2 = torch.unsqueeze(aux_feat2, 1)
+        aux_feat2 = torch.add(aux_feat2, feat_map2)
+
+        aux_feat3, prob_action3 = self.attention_net(query3, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat3 = torch.unsqueeze(aux_feat3, 1)
+        aux_feat3 = torch.add(aux_feat3, feat_map3)
+
+        aux_feat4, prob_action4 = self.attention_net(query4, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat4 = torch.unsqueeze(aux_feat4, 1)
+        aux_feat4 = torch.add(aux_feat4, feat_map4)
+
+        aux_feat5, prob_action5 = self.attention_net(query5, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat5 = torch.unsqueeze(aux_feat5, 1)
+        aux_feat5 = torch.add(aux_feat5, feat_map5)
+
+        aux_feat6, prob_action6 = self.attention_net(query6, token_key, featmaps_act, sparse=self.sparse)
+        aux_feat6 = torch.unsqueeze(aux_feat6, 1)
+        aux_feat6 = torch.add(aux_feat6, feat_map6)
+
+        num_connect += batch_size * self.agent_num
+
+        feat_fuse = torch.cat((aux_feat1, aux_feat2, aux_feat3, aux_feat4, aux_feat5, aux_feat6), 1)
 
         # weighted feature maps is passed to decoder
         feat_fuse_mat = self.agents2batch(feat_fuse)  # [12, 512, 16, 16]
-        pred = self.decoder(feat_fuse_mat)  # [12, 11, 512, 512] confirm if 11 is class-label
+        pred = self.decoder(feat_fuse_mat)  # [12, 11, 512, 512]
         num_connect /= (batch_size * self.agent_num)
 
         return pred, num_connect
