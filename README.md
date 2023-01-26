@@ -1,7 +1,7 @@
-## When2com: Multi-Agent Perception via Communication Graph Grouping
+## Multi-Agent Perception via learnable token demo
 <img src="teaser/pytorch-logo-dark.png" width="10%"> [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) 
 
-This is the PyTorch implementation of our paper: <br>
+This is the PyTorch implementation and modification based on When2com: <br>
 **When2com: Multi-Agent Perception via Communication Graph Grouping**<br>
 [__***Yen-Cheng Liu***__](https://ycliu93.github.io/), [Junjiao Tian](https://www.linkedin.com/in/junjiao-tian-42b9758a/), [Nathaniel Glaser](https://sites.google.com/view/nathanglaser/), [Zsolt Kira](https://www.cc.gatech.edu/~zk15/)<br>
 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2020 <br>
@@ -69,20 +69,4 @@ python test.py --config configs/srms-allnorm.yml --model_path <your trained weig
 
 # [Multi-request multi-support] when2com model  
 python test.py --config configs/mrms-when2com.yml --model_path <your trained weights> --gpu=0
-```
-
-## Acknowledgments
-- This work was supported by ONR grant N00014-18-1-2829.
-- This code is built upon the implementation from [Pytorch-semseg](https://github.com/meetshah1995/pytorch-semseg).
-
-## Citation
-If you find this repository useful, please cite our paper:
-
-```
-@inproceedings{liu2020when2com,
-    title={When2com: Multi-Agent Perception via Communication Graph Grouping},
-    author={Yen-Cheng Liu and Junjiao Tian and Nathaniel Glaser and Zsolt Kira},
-    booktitle={Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR)},
-    year={2020}
-}
 ```
